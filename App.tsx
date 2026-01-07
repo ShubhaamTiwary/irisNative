@@ -11,6 +11,8 @@ import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
+import { useEffect } from 'react';
+import nodejs from 'nodejs-mobile-react-native';
 
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
@@ -25,6 +27,26 @@ function App() {
 
 function AppContent() {
   const safeAreaInsets = useSafeAreaInsets();
+
+  useEffect(() => {
+    // Start the Node.js runtime
+    nodejs.start('main.js');
+
+    // Set up channel listeners
+    nodejs.channel.addListener('message', (msg) => {
+      console.log('[React Native] Received message from Node.js:', msg);
+    });
+
+    nodejs.channel.addListener('server-ready', (data) => {
+      console.log('[React Native] Node.js server is ready:', data);
+    });
+
+    // Cleanup on unmount
+    return () => {
+      nodejs.channel.removeAllListeners('message');
+      nodejs.channel.removeAllListeners('server-ready');
+    };
+  }, []);
 
   return (
     <View style={styles.container}>
