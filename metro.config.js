@@ -1,5 +1,4 @@
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
-const exclusionList = require('metro-config/src/defaults/exclusionList');
 
 /**
  * Metro configuration
@@ -9,12 +8,12 @@ const exclusionList = require('metro-config/src/defaults/exclusionList');
  */
 const config = {
   resolver: {
-    blacklistRE: exclusionList([
+    blockList: [
       /\/nodejs-project\/.*/,
       /\/nodejs-assets\/.*/,
       /\/android\/.*/,
       /\/ios\/.*/,
-    ]),
+    ],
   },
 };
 
