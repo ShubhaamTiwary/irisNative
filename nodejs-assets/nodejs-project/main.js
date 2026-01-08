@@ -100,10 +100,33 @@ server.listen(PORT, () => {
 
 // Global socket instance for Baileys
 let baileysSocket = null;
+let isInitializing = false;
+let reconnectTimeout = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const INITIAL_RECONNECT_DELAY = 2000; // 2 seconds
 
 // Baileys Integration
 async function startBaileys() {
+  // Prevent multiple simultaneous initializations
+  if (isInitializing) {
+    console.log(
+      '[node] Baileys initialization already in progress, skipping...',
+    );
+    return;
+  }
+
+  // If socket already exists and is connected, don't reinitialize
+  if (baileysSocket) {
+    console.log(
+      '[node] Baileys socket already exists, skipping initialization',
+    );
+    return;
+  }
+
+  isInitializing = true;
   console.log('[node] Starting Baileys integration...');
+
   try {
     const {
       default: makeWASocket,
@@ -127,11 +150,13 @@ async function startBaileys() {
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false, // Cannot print to terminal in mobile environment easily
-      logger: require('pino')({ level: 'debug' }), // Using pino as recommended
+      logger: require('pino')({ level: 'silent' }), // Reduce logging to prevent spam
     });
 
     // Store socket globally
     baileysSocket = sock;
+    isInitializing = false;
+    reconnectAttempts = 0; // Reset reconnect attempts on successful initialization
 
     sock.ev.on('connection.update', update => {
       const { connection, lastDisconnect, qr } = update;
@@ -146,18 +171,61 @@ async function startBaileys() {
         const shouldReconnect =
           lastDisconnect?.error?.output?.statusCode !==
           DisconnectReason.loggedOut;
+
+        const errorMessage = lastDisconnect?.error?.message || 'Unknown error';
         console.log(
-          '[node] Connection closed due to ',
-          lastDisconnect?.error,
-          ', reconnecting ',
+          '[node] Connection closed due to',
+          errorMessage,
+          ', should reconnect:',
           shouldReconnect,
         );
-        baileysSocket = null; // Clear socket on close
+
+        // Clear the socket reference
+        baileysSocket = null;
+        isInitializing = false;
+
         if (shouldReconnect) {
-          startBaileys();
+          reconnectAttempts++;
+
+          // Check if we've exceeded max reconnect attempts
+          if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+            console.error(
+              '[node] Max reconnect attempts reached, stopping reconnection',
+            );
+            rn_bridge.channel.post('baileys-error', {
+              error: 'Max reconnect attempts reached',
+            });
+            return;
+          }
+
+          // Calculate exponential backoff delay (capped at 30 seconds)
+          const delay = Math.min(
+            INITIAL_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1),
+            30000,
+          );
+
+          console.log(
+            `[node] Scheduling reconnection attempt ${reconnectAttempts} in ${delay}ms`,
+          );
+
+          // Clear any existing timeout
+          if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+          }
+
+          // Schedule reconnection with delay
+          reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            startBaileys();
+          }, delay);
+        } else {
+          console.log(
+            '[node] Not reconnecting (logged out or should not reconnect)',
+          );
         }
       } else if (connection === 'open') {
         console.log('[node] Baileys connection opened successfully');
+        reconnectAttempts = 0; // Reset on successful connection
         rn_bridge.channel.post('baileys-connection', { status: 'open' });
       }
     });
@@ -166,13 +234,17 @@ async function startBaileys() {
 
     console.log('[node] Baileys socket initialized');
   } catch (err) {
+    isInitializing = false;
     console.error('[node] Failed to start Baileys:', err);
     rn_bridge.channel.post('baileys-error', { error: err.message });
+
+    // Don't retry immediately on initialization errors
+    // Only retry on connection close events
   }
 }
 
-// Start Baileys
-startBaileys();
+// Don't auto-start Baileys - wait for explicit request from React Native
+// startBaileys() will be called when a deep link is received
 
 // Handle messages from React Native
 rn_bridge.channel.on('message', async msg => {
@@ -182,6 +254,17 @@ rn_bridge.channel.on('message', async msg => {
     '[node] Message keys:',
     msg && typeof msg === 'object' ? Object.keys(msg) : 'N/A',
   );
+
+  // Check if this is a start-whatsapp command
+  if (msg && typeof msg === 'object' && msg.type === 'start-whatsapp') {
+    console.log('[node] Starting WhatsApp initialization requested');
+    if (!baileysSocket && !isInitializing) {
+      startBaileys();
+    } else {
+      console.log('[node] WhatsApp already initialized or initializing');
+    }
+    return;
+  }
 
   // Check if this is a send-message command
   if (msg && typeof msg === 'object' && msg.type === 'send-message') {
