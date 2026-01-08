@@ -55,16 +55,16 @@ function AppContent() {
   const parseDeepLink = (url: string): string | null => {
     try {
       console.log('[React Native] Parsing deep link:', url);
-      if (!url || !url.includes('irisNative://')) {
+      if (!url || !url.includes('iris://')) {
         return null;
       }
 
       // Handle the case where openLink contains query parameters
-      // Format: irisNative://?openLink=https://example.com?param1=value1&param2=value2
+      // Format: iris://?openLink=https://example.com?param1=value1&param2=value2
       // The openLink value itself may contain & characters, so we need to extract it carefully
 
       // Remove the scheme part
-      const urlWithoutScheme = url.replace('irisNative://', '');
+      const urlWithoutScheme = url.replace('iris://', '');
 
       // Check if there's a query string
       if (!urlWithoutScheme.startsWith('?')) {
@@ -200,19 +200,31 @@ function AppContent() {
   useEffect(() => {
     // Handle deep link when app is opened via deep link (initial launch)
     const handleInitialURL = async () => {
-      const initialUrl = await Linking.getInitialURL();
-      if (initialUrl && !initialDeepLinkProcessed.current) {
-        console.log('[React Native] App opened with deep link:', initialUrl);
-        initialDeepLinkProcessed.current = true;
-        processDeepLink(initialUrl);
-      } else if (!initialUrl) {
-        // No deep link on initial launch
-        console.log('[React Native] App opened without deep link');
+      try {
+        const initialUrl = await Linking.getInitialURL();
+        console.log('[React Native] Initial URL check:', initialUrl);
+
+        if (initialUrl) {
+          console.log('[React Native] App opened with deep link:', initialUrl);
+          if (!initialDeepLinkProcessed.current) {
+            initialDeepLinkProcessed.current = true;
+            processDeepLink(initialUrl);
+          }
+        } else {
+          // No deep link on initial launch
+          console.log('[React Native] App opened without deep link');
+          setHasDeepLink(false);
+        }
+      } catch (error) {
+        console.error('[React Native] Error getting initial URL:', error);
         setHasDeepLink(false);
       }
     };
 
-    handleInitialURL();
+    // Small delay to ensure React Native is ready
+    const timeoutId = setTimeout(() => {
+      handleInitialURL();
+    }, 100);
 
     // Handle deep link when app is already running
     // This will be called every time a new deep link is received
@@ -227,6 +239,7 @@ function AppContent() {
     });
 
     return () => {
+      clearTimeout(timeoutId);
       subscription.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -359,7 +372,7 @@ function AppContent() {
               Please open this app using a deep link.{'\n\n'}
               The app only works when launched via:{'\n'}
               <Text style={styles.deeplinkExample}>
-                irisNative://?openLink=https://...
+                iris://?openLink=https://...
               </Text>
             </Text>
           </View>

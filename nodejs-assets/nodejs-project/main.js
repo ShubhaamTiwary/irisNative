@@ -106,6 +106,24 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const INITIAL_RECONNECT_DELAY = 2000; // 2 seconds
 
+// Cleanup function for Baileys
+function cleanupBaileys() {
+  if (baileysSocket) {
+    console.log('[node] Cleaning up Baileys socket...');
+    try {
+      baileysSocket.end();
+    } catch (err) {
+      console.error('[node] Error closing socket:', err);
+    }
+    baileysSocket = null;
+  }
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  isInitializing = false;
+}
+
 // Baileys Integration
 async function startBaileys() {
   // Prevent multiple simultaneous initializations
@@ -146,6 +164,16 @@ async function startBaileys() {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(authInfoPath);
+
+    // Log if we're restoring an existing session
+    if (state.creds && state.creds.me) {
+      console.log(
+        '[node] Restoring existing WhatsApp session for:',
+        state.creds.me.id || 'Unknown',
+      );
+    } else {
+      console.log('[node] No existing session found, will require QR scan');
+    }
 
     const sock = makeWASocket({
       auth: state,
@@ -381,22 +409,39 @@ rn_bridge.channel.on('send-message', async data => {
 
 // Handle app lifecycle events
 rn_bridge.app.on('pause', pauseLock => {
-  console.log('[node] App paused');
-  // You can perform cleanup here
+  console.log('[node] App paused - session will be preserved');
+  // Don't close the socket, just let it stay connected
+  // The session is already saved via saveCreds on creds.update events
+  // Credentials are persisted in baileys_auth_info directory
   pauseLock.release();
 });
 
 rn_bridge.app.on('resume', () => {
   console.log('[node] App resumed');
+  // If socket exists and was connected, Baileys will handle reconnection automatically
+  // If socket doesn't exist, we'll wait for a deep link to reinitialize
+  // The saved session will be restored automatically when startBaileys() is called
 });
 
 // Handle shutdown gracefully
 process.on('SIGTERM', () => {
   console.log('[node] SIGTERM received, shutting down gracefully');
+  cleanupBaileys();
   server.close(() => {
     console.log('[node] HTTP server closed');
     process.exit(0);
   });
+});
+
+// Handle uncaught exceptions to prevent crashes
+process.on('uncaughtException', err => {
+  console.error('[node] Uncaught exception:', err);
+  // Don't exit - just log the error to preserve session
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[node] Unhandled rejection at:', promise, 'reason:', reason);
+  // Don't exit - just log the error to preserve session
 });
 
 console.log('[node] Node.js runtime initialized');
