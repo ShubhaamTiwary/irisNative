@@ -104,6 +104,7 @@ let baileysSocket = null;
 let isInitializing = false;
 let reconnectTimeout = null;
 let reconnectAttempts = 0;
+let loggedInPhoneNumber = null; // Store the logged-in phone number
 const MAX_RECONNECT_ATTEMPTS = 10;
 const INITIAL_RECONNECT_DELAY = 2000; // 2 seconds
 
@@ -168,12 +169,19 @@ async function startBaileys() {
 
     // Log if we're restoring an existing session
     if (state.creds && state.creds.me) {
+      const meId = state.creds.me.id || '';
       console.log(
         '[node] Restoring existing WhatsApp session for:',
-        state.creds.me.id || 'Unknown',
+        meId || 'Unknown',
       );
+      // Extract and store phone number if available
+      if (meId) {
+        loggedInPhoneNumber = meId.includes('@') ? meId.split('@')[0] : meId;
+        console.log('[node] Stored phone number:', loggedInPhoneNumber);
+      }
     } else {
       console.log('[node] No existing session found, will require QR scan');
+      loggedInPhoneNumber = null;
     }
 
     const sock = makeWASocket({
@@ -212,6 +220,15 @@ async function startBaileys() {
         // Clear the socket reference
         baileysSocket = null;
         isInitializing = false;
+        // Clear phone number on disconnect (unless it's a logout)
+        // Note: On logout, we'll clear it explicitly in handleLogout
+        if (
+          lastDisconnect?.error?.output?.statusCode ===
+          DisconnectReason.loggedOut
+        ) {
+          loggedInPhoneNumber = null;
+          console.log('[node] Cleared phone number due to logout');
+        }
 
         if (shouldReconnect) {
           reconnectAttempts++;
@@ -255,6 +272,21 @@ async function startBaileys() {
       } else if (connection === 'open') {
         console.log('[node] Baileys connection opened successfully');
         reconnectAttempts = 0; // Reset on successful connection
+
+        // Extract and store phone number from socket
+        if (sock.user) {
+          const userId = sock.user.id || '';
+          if (userId) {
+            loggedInPhoneNumber = userId.includes('@')
+              ? userId.split('@')[0]
+              : userId;
+            console.log(
+              '[node] Stored phone number from connection:',
+              loggedInPhoneNumber,
+            );
+          }
+        }
+
         rn_bridge.channel.post('baileys-connection', { status: 'open' });
       }
     });
@@ -362,6 +394,161 @@ async function handleSendMessage(data) {
   }
 }
 
+// Handle logout from WhatsApp
+async function handleLogout(data) {
+  const requestId = data.requestId;
+
+  try {
+    console.log('[node] Handling logout request');
+
+    if (baileysSocket) {
+      try {
+        // Logout from WhatsApp
+        await baileysSocket.logout();
+        console.log('[node] Logged out from WhatsApp successfully');
+      } catch (err) {
+        console.error('[node] Error during logout:', err);
+        // Continue with cleanup even if logout fails
+      }
+    }
+
+    // Clean up the socket
+    cleanupBaileys();
+
+    // Clear stored phone number
+    loggedInPhoneNumber = null;
+
+    // Delete the auth info directory to clear saved session
+    const authInfoPath = path.join(__dirname, 'baileys_auth_info');
+    if (fs.existsSync(authInfoPath)) {
+      console.log('[node] Deleting auth info directory:', authInfoPath);
+      try {
+        // Delete all files in the directory
+        const files = fs.readdirSync(authInfoPath);
+        for (const file of files) {
+          fs.unlinkSync(path.join(authInfoPath, file));
+        }
+        // Remove the directory
+        fs.rmdirSync(authInfoPath);
+        console.log('[node] Auth info directory deleted successfully');
+      } catch (err) {
+        console.error('[node] Error deleting auth info directory:', err);
+        // Continue even if deletion fails
+      }
+    }
+
+    // Notify React Native that logout was successful
+    rn_bridge.channel.post('logout-complete', {
+      success: true,
+      requestId,
+    });
+
+    console.log('[node] Logout completed successfully');
+  } catch (err) {
+    console.error('[node] Failed to logout:', err);
+    console.error('[node] Error stack:', err.stack);
+    rn_bridge.channel.post('logout-complete', {
+      success: false,
+      error: err.message || String(err),
+      requestId,
+    });
+  }
+}
+
+// Handle get phone number request
+async function handleGetPhoneNumber(data) {
+  const requestId = data.requestId;
+
+  try {
+    console.log('[node] Handling get phone number request');
+
+    // Check if socket is initialized
+    if (!baileysSocket) {
+      throw new Error(
+        'WhatsApp socket not initialized. Please connect to WhatsApp first.',
+      );
+    }
+
+    // Try to get phone number from stored value first
+    let phoneNumber = loggedInPhoneNumber;
+
+    // If not stored, try multiple methods to get from socket
+    if (!phoneNumber) {
+      // Method 1: Try baileysSocket.user.id
+      if (baileysSocket.user && baileysSocket.user.id) {
+        const userId = baileysSocket.user.id;
+        phoneNumber = userId.includes('@') ? userId.split('@')[0] : userId;
+        console.log(
+          '[node] Got phone number from socket.user.id:',
+          phoneNumber,
+        );
+      }
+      // Method 2: Try baileysSocket.authState.creds.me.id
+      else if (
+        baileysSocket.authState &&
+        baileysSocket.authState.creds &&
+        baileysSocket.authState.creds.me &&
+        baileysSocket.authState.creds.me.id
+      ) {
+        const meId = baileysSocket.authState.creds.me.id;
+        phoneNumber = meId.includes('@') ? meId.split('@')[0] : meId;
+        console.log(
+          '[node] Got phone number from authState.creds.me.id:',
+          phoneNumber,
+        );
+      }
+      // Method 3: Try to get from connection state
+      else if (baileysSocket.ws && baileysSocket.ws.user) {
+        const userId = baileysSocket.ws.user.id || '';
+        if (userId) {
+          phoneNumber = userId.includes('@') ? userId.split('@')[0] : userId;
+          console.log('[node] Got phone number from ws.user.id:', phoneNumber);
+        }
+      }
+
+      // Store it for future requests if we found it
+      if (phoneNumber) {
+        loggedInPhoneNumber = phoneNumber;
+      }
+    }
+
+    // Validate phone number format (should be numeric)
+    if (phoneNumber) {
+      // Remove any non-numeric characters except + at the start
+      const cleaned = phoneNumber.replace(/[^\d+]/g, '');
+      if (cleaned.length > 0) {
+        phoneNumber = cleaned;
+      }
+    }
+
+    // Final check - if still not available, throw error
+    if (!phoneNumber || phoneNumber.length === 0) {
+      throw new Error(
+        'Phone number not available. Please ensure you are logged in to WhatsApp.',
+      );
+    }
+
+    console.log('[node] Phone number retrieved:', phoneNumber);
+
+    // Notify React Native with the phone number
+    rn_bridge.channel.post('phone-number', {
+      success: true,
+      phoneNumber: phoneNumber,
+      requestId,
+    });
+
+    console.log('[node] Phone number request completed successfully');
+  } catch (err) {
+    console.error('[node] Failed to get phone number:', err);
+    console.error('[node] Error stack:', err.stack);
+    rn_bridge.channel.post('phone-number', {
+      success: false,
+      error: err.message || String(err),
+      requestId,
+    });
+  }
+}
+
 // Handle messages from React Native
 rn_bridge.channel.on('message', async msg => {
   console.log('[node] Received message from React Native:', msg);
@@ -389,6 +576,20 @@ rn_bridge.channel.on('message', async msg => {
     return;
   }
 
+  // Check if this is a logout command
+  if (msg && typeof msg === 'object' && msg.type === 'logout') {
+    console.log('[node] Routing logout command from message channel');
+    await handleLogout(msg);
+    return;
+  }
+
+  // Check if this is a get-phone-number command
+  if (msg && typeof msg === 'object' && msg.type === 'get-phone-number') {
+    console.log('[node] Routing get-phone-number command from message channel');
+    await handleGetPhoneNumber(msg);
+    return;
+  }
+
   // Echo other messages back
   rn_bridge.channel.post('message', {
     echo: msg,
@@ -402,6 +603,18 @@ rn_bridge.channel.on('message', async msg => {
 rn_bridge.channel.on('send-message', async data => {
   console.log('[node] Received send-message request (direct):', data);
   await handleSendMessage(data);
+});
+
+// Handle logout command from React Native
+rn_bridge.channel.on('logout', async data => {
+  console.log('[node] Received logout request (direct):', data);
+  await handleLogout(data);
+});
+
+// Handle get-phone-number command from React Native
+rn_bridge.channel.on('get-phone-number', async data => {
+  console.log('[node] Received get-phone-number request (direct):', data);
+  await handleGetPhoneNumber(data);
 });
 
 // Handle app lifecycle events

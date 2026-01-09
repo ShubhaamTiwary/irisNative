@@ -327,6 +327,79 @@ function AppContent() {
       },
     );
 
+    // Listen for logout confirmation
+    nodejs.channel.addListener(
+      'logout-complete',
+      (data: { success: boolean; error?: string; requestId?: string }) => {
+        console.log('[React Native] Logout result:', data);
+
+        if (data.requestId && pendingRequests.current.has(data.requestId)) {
+          const { resolve, reject } = pendingRequests.current.get(
+            data.requestId,
+          )!;
+          if (data.success) {
+            // Close WebView immediately
+            setShowWebView(false);
+            setUrlToOpen(null);
+            setPendingUrl(null);
+
+            // Reset connection state on successful logout
+            setIsConnected(false);
+            isConnectedRef.current = false;
+            setWhatsappInitialized(false);
+            whatsappInitializedRef.current = false;
+            setQrCode(null); // Will be set again when new QR is generated
+
+            // Restart WhatsApp to generate new QR code
+            console.log('[React Native] Restarting WhatsApp after logout...');
+            setTimeout(() => {
+              if (nodejsStarted) {
+                nodejs.channel.send({ type: 'start-whatsapp' });
+              }
+            }, 500); // Small delay to ensure cleanup is complete
+
+            resolve(data);
+          } else {
+            reject(new Error(data.error || 'Unknown error'));
+          }
+          pendingRequests.current.delete(data.requestId);
+        } else if (!data.success) {
+          console.error('[React Native] Failed to logout:', data.error);
+        }
+      },
+    );
+
+    // Listen for phone number response
+    nodejs.channel.addListener(
+      'phone-number',
+      (data: {
+        success: boolean;
+        phoneNumber?: string;
+        error?: string;
+        requestId?: string;
+      }) => {
+        console.log('[React Native] Phone number result:', data);
+
+        if (data.requestId && pendingRequests.current.has(data.requestId)) {
+          const { resolve, reject } = pendingRequests.current.get(
+            data.requestId,
+          )!;
+          if (data.success && data.phoneNumber) {
+            // Return just the phone number string to match the frontend API
+            resolve(data.phoneNumber);
+          } else {
+            reject(new Error(data.error || 'Unknown error'));
+          }
+          pendingRequests.current.delete(data.requestId);
+        } else if (!data.success) {
+          console.error(
+            '[React Native] Failed to get phone number:',
+            data.error,
+          );
+        }
+      },
+    );
+
     // Listen for errors
     nodejs.channel.addListener('baileys-error', (data: { error: string }) => {
       console.error('[React Native] Baileys error:', data.error);
@@ -376,9 +449,65 @@ function AppContent() {
     [nodejsStarted],
   );
 
-  // Expose sendMessage to global scope for debugging/usage
+  const logout = useCallback(async () => {
+    return new Promise((resolve, reject) => {
+      if (!nodejsStarted) {
+        reject(new Error('Node.js runtime not started'));
+        return;
+      }
+
+      const requestId = Date.now().toString() + Math.random().toString();
+      pendingRequests.current.set(requestId, { resolve, reject });
+
+      // Use channel.post to send to 'logout' event
+      nodejs.channel.post('logout', {
+        requestId,
+      });
+
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        if (pendingRequests.current.has(requestId)) {
+          const req = pendingRequests.current.get(requestId);
+          if (req) {
+            req.reject(new Error('Request timed out'));
+          }
+          pendingRequests.current.delete(requestId);
+        }
+      }, 30000);
+    });
+  }, [nodejsStarted]);
+
+  const getPhoneNumber = useCallback(async () => {
+    return new Promise((resolve, reject) => {
+      if (!nodejsStarted) {
+        reject(new Error('Node.js runtime not started'));
+        return;
+      }
+
+      const requestId = Date.now().toString() + Math.random().toString();
+      pendingRequests.current.set(requestId, { resolve, reject });
+
+      // Use channel.post to send to 'get-phone-number' event
+      nodejs.channel.post('get-phone-number', {
+        requestId,
+      });
+
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        if (pendingRequests.current.has(requestId)) {
+          const req = pendingRequests.current.get(requestId);
+          if (req) {
+            req.reject(new Error('Request timed out'));
+          }
+          pendingRequests.current.delete(requestId);
+        }
+      }, 30000);
+    });
+  }, [nodejsStarted]);
+
+  // Expose sendMessage, logout, and getPhoneNumber to global scope for debugging/usage
   useEffect(() => {
-    const api = { sendMessage };
+    const api = { sendMessage, logout, getPhoneNumber };
 
     // 1. Expose on global
     // eslint-disable-next-line no-undef
@@ -390,7 +519,7 @@ function AppContent() {
       (global as any).window = global;
     }
     (global as any).window.irisElectron = api;
-  }, [sendMessage]);
+  }, [sendMessage, logout, getPhoneNumber]);
 
   const handleSendMessage = async () => {
     console.log('[React Native] handleSendMessage called');
@@ -433,26 +562,35 @@ function AppContent() {
               requestId: requestId
             }));
             
-            // Create a one-time event listener for the response
-            const handleResponse = (event) => {
-              try {
-                const response = JSON.parse(event.data);
-                if (response.requestId === requestId) {
-                  window.removeEventListener('message', handleResponse);
-                  if (response.success) {
-                    resolve(response);
-                  } else {
-                    reject(new Error(response.error || 'Unknown error'));
-                  }
-                }
-              } catch (e) {
-                // Ignore parsing errors for other messages
-              }
-            };
+            // Store the promise handlers globally to be called from injected JS
+            if (!window.irisPendingRequests) {
+              window.irisPendingRequests = {};
+            }
+            window.irisPendingRequests[requestId] = { resolve, reject };
+          });
+        },
+        logout: function() {
+          return new Promise((resolve, reject) => {
+            const requestId = Date.now().toString() + Math.random().toString();
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'logout',
+              requestId: requestId
+            }));
             
-            // Note: Standard window.postMessage from RN to WebView doesn't work exactly like 
-            // iframe postMessage, so we might need a custom event dispatcher mechanism
-            // For now, let's assume we'll inject the response back as JS
+            // Store the promise handlers globally to be called from injected JS
+            if (!window.irisPendingRequests) {
+              window.irisPendingRequests = {};
+            }
+            window.irisPendingRequests[requestId] = { resolve, reject };
+          });
+        },
+        getPhoneNumber: function() {
+          return new Promise((resolve, reject) => {
+            const requestId = Date.now().toString() + Math.random().toString();
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'getPhoneNumber',
+              requestId: requestId
+            }));
             
             // Store the promise handlers globally to be called from injected JS
             if (!window.irisPendingRequests) {
@@ -475,6 +613,7 @@ function AppContent() {
           onMessage={async event => {
             try {
               const message = JSON.parse(event.nativeEvent.data);
+
               if (message.type === 'sendMessage') {
                 console.log(
                   '[React Native] Received sendMessage from WebView:',
@@ -513,7 +652,105 @@ function AppContent() {
                     if (${result.success}) {
                       req.resolve(${JSON.stringify(result)});
                     } else {
-                      req.reject(new Error(${JSON.stringify(result.error)}));
+                      req.reject(new Error(${JSON.stringify(
+                        (result as any).error || 'Unknown error',
+                      )}));
+                    }
+                  }
+                `;
+
+                if (webViewRef.current) {
+                  webViewRef.current.injectJavaScript(responseScript);
+                }
+              } else if (message.type === 'logout') {
+                console.log(
+                  '[React Native] Received logout request from WebView',
+                );
+
+                let result;
+                try {
+                  const response = await logout();
+                  result = {
+                    success: true,
+                    ...(response || {}),
+                    requestId: message.requestId,
+                  };
+                } catch (error: any) {
+                  console.error(
+                    '[React Native] Error logging out from WebView:',
+                    error,
+                  );
+                  result = {
+                    success: false,
+                    error: error.message || String(error),
+                    requestId: message.requestId,
+                  };
+                }
+
+                // Send response back to WebView
+                const responseScript = `
+                  if (window.irisPendingRequests && window.irisPendingRequests['${
+                    message.requestId
+                  }']) {
+                    const req = window.irisPendingRequests['${
+                      message.requestId
+                    }'];
+                    delete window.irisPendingRequests['${message.requestId}'];
+                    if (${result.success}) {
+                      req.resolve(${JSON.stringify(result)});
+                    } else {
+                      req.reject(new Error(${JSON.stringify(
+                        (result as any).error || 'Unknown error',
+                      )}));
+                    }
+                  }
+                `;
+
+                if (webViewRef.current) {
+                  webViewRef.current.injectJavaScript(responseScript);
+                }
+              } else if (message.type === 'getPhoneNumber') {
+                console.log(
+                  '[React Native] Received getPhoneNumber request from WebView',
+                );
+
+                let result;
+                try {
+                  const phoneNumber = await getPhoneNumber();
+                  // Return just the phone number string to match frontend API
+                  result = {
+                    success: true,
+                    phoneNumber: phoneNumber,
+                    requestId: message.requestId,
+                  };
+                } catch (error: any) {
+                  console.error(
+                    '[React Native] Error getting phone number from WebView:',
+                    error,
+                  );
+                  result = {
+                    success: false,
+                    error: error.message || String(error),
+                    requestId: message.requestId,
+                  };
+                }
+
+                // Send response back to WebView
+                const responseScript = `
+                  if (window.irisPendingRequests && window.irisPendingRequests['${
+                    message.requestId
+                  }']) {
+                    const req = window.irisPendingRequests['${
+                      message.requestId
+                    }'];
+                    delete window.irisPendingRequests['${message.requestId}'];
+                    if (${result.success}) {
+                      // Return just the phone number string
+                      req.resolve(${JSON.stringify(result.phoneNumber)});
+                    } else {
+                      req.reject(new Error(${JSON.stringify(
+                        (result as any).error || 'Unknown error',
+                      )}));
                     }
                   }
                 `;
