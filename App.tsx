@@ -19,7 +19,7 @@ import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import nodejs from 'nodejs-mobile-react-native';
 import QRCode from 'react-native-qrcode-svg';
 import { WebView } from 'react-native-webview';
@@ -46,10 +46,17 @@ function AppContent() {
   const [whatsappInitialized, setWhatsappInitialized] = useState(false);
   const [hasDeepLink, setHasDeepLink] = useState(false);
   const [nodejsStarted, setNodejsStarted] = useState(false);
+  const webViewRef = useRef<WebView>(null);
   const initialDeepLinkProcessed = useRef(false);
   // Use refs to always have latest state values in event listeners
   const whatsappInitializedRef = useRef(false);
   const isConnectedRef = useRef(false);
+  const pendingRequests = useRef<
+    Map<
+      string,
+      { resolve: (value: any) => void; reject: (reason?: any) => void }
+    >
+  >(new Map());
 
   // Parse deep link URL
   const parseDeepLink = (url: string): string | null => {
@@ -300,10 +307,21 @@ function AppContent() {
     // Listen for message sent confirmation
     nodejs.channel.addListener(
       'message-sent',
-      (data: { success: boolean; error?: string }) => {
+      (data: { success: boolean; error?: string; requestId?: string }) => {
         console.log('[React Native] Message sent result:', data);
         setIsSending(false);
-        if (!data.success) {
+
+        if (data.requestId && pendingRequests.current.has(data.requestId)) {
+          const { resolve, reject } = pendingRequests.current.get(
+            data.requestId,
+          )!;
+          if (data.success) {
+            resolve(data);
+          } else {
+            reject(new Error(data.error || 'Unknown error'));
+          }
+          pendingRequests.current.delete(data.requestId);
+        } else if (!data.success) {
           console.error('[React Native] Failed to send message:', data.error);
         }
       },
@@ -322,32 +340,192 @@ function AppContent() {
     };
   }, [pendingUrl, nodejsStarted]);
 
-  const handleSendMessage = () => {
+  const sendMessage = useCallback(
+    async (data: {
+      phone: string;
+      message: string;
+      document?: { data: string; mimeType: string; filename: string };
+    }) => {
+      return new Promise((resolve, reject) => {
+        if (!nodejsStarted) {
+          reject(new Error('Node.js runtime not started'));
+          return;
+        }
+
+        const requestId = Date.now().toString() + Math.random().toString();
+        pendingRequests.current.set(requestId, { resolve, reject });
+
+        // Use channel.post to send to 'send-message' event directly
+        nodejs.channel.post('send-message', {
+          ...data,
+          requestId,
+        });
+
+        // Timeout after 30 seconds
+        setTimeout(() => {
+          if (pendingRequests.current.has(requestId)) {
+            const req = pendingRequests.current.get(requestId);
+            if (req) {
+              req.reject(new Error('Request timed out'));
+            }
+            pendingRequests.current.delete(requestId);
+          }
+        }, 30000);
+      });
+    },
+    [nodejsStarted],
+  );
+
+  // Expose sendMessage to global scope for debugging/usage
+  useEffect(() => {
+    const api = { sendMessage };
+
+    // 1. Expose on global
+    // eslint-disable-next-line no-undef
+    (global as any).irisElectron = api;
+
+    // 2. Ensure window exists and expose on window
+    // This allows checks like "typeof window" and "window.irisElectron" to pass
+    if (typeof (global as any).window === 'undefined') {
+      (global as any).window = global;
+    }
+    (global as any).window.irisElectron = api;
+  }, [sendMessage]);
+
+  const handleSendMessage = async () => {
     console.log('[React Native] handleSendMessage called');
     setIsSending(true);
     const phoneNumber = '917389893567';
-    const message = 'Hello from Baileys!';
+    const message = 'Hello from Baileys with Promise API!';
 
-    console.log('[React Native] Sending message:', { phoneNumber, message });
+    try {
+      console.log('[React Native] Sending message:', { phoneNumber, message });
 
-    // nodejs-mobile-react-native channel.send() sends to 'message' channel
-    // So we need to wrap it in an object with type
-    nodejs.channel.send({
-      type: 'send-message',
-      phoneNumber,
-      message,
-    });
+      const result = await sendMessage({
+        phone: phoneNumber,
+        message,
+        // Example document (uncomment to test)
+        // document: {
+        //   data: 'base64_string_here',
+        //   mimeType: 'text/plain',
+        //   filename: 'test.txt'
+        // }
+      });
 
-    console.log('[React Native] Message sent to Node.js');
+      console.log('[React Native] Message sent successfully via API:', result);
+    } catch (error) {
+      console.error('[React Native] Failed to send message via API:', error);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   // If WebView should be shown, display it
   if (showWebView && urlToOpen) {
+    const injectedJavaScript = `
+      window.irisElectron = {
+        sendMessage: function(data) {
+          return new Promise((resolve, reject) => {
+            const requestId = Date.now().toString() + Math.random().toString();
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'sendMessage',
+              data: data,
+              requestId: requestId
+            }));
+            
+            // Create a one-time event listener for the response
+            const handleResponse = (event) => {
+              try {
+                const response = JSON.parse(event.data);
+                if (response.requestId === requestId) {
+                  window.removeEventListener('message', handleResponse);
+                  if (response.success) {
+                    resolve(response);
+                  } else {
+                    reject(new Error(response.error || 'Unknown error'));
+                  }
+                }
+              } catch (e) {
+                // Ignore parsing errors for other messages
+              }
+            };
+            
+            // Note: Standard window.postMessage from RN to WebView doesn't work exactly like 
+            // iframe postMessage, so we might need a custom event dispatcher mechanism
+            // For now, let's assume we'll inject the response back as JS
+            
+            // Store the promise handlers globally to be called from injected JS
+            if (!window.irisPendingRequests) {
+              window.irisPendingRequests = {};
+            }
+            window.irisPendingRequests[requestId] = { resolve, reject };
+          });
+        }
+      };
+      true; // Note: The injected script must return a boolean or nothing
+    `;
+
     return (
       <View style={[styles.container, { paddingTop: safeAreaInsets.top }]}>
         <WebView
+          ref={webViewRef}
           source={{ uri: urlToOpen }}
           style={styles.webview}
+          injectedJavaScriptBeforeContentLoaded={injectedJavaScript}
+          onMessage={async event => {
+            try {
+              const message = JSON.parse(event.nativeEvent.data);
+              if (message.type === 'sendMessage') {
+                console.log(
+                  '[React Native] Received sendMessage from WebView:',
+                  message.data,
+                );
+
+                let result;
+                try {
+                  const response = await sendMessage(message.data);
+                  result = {
+                    success: true,
+                    ...(response || {}),
+                    requestId: message.requestId,
+                  };
+                } catch (error: any) {
+                  console.error(
+                    '[React Native] Error sending message from WebView:',
+                    error,
+                  );
+                  result = {
+                    success: false,
+                    error: error.message || String(error),
+                    requestId: message.requestId,
+                  };
+                }
+
+                // Send response back to WebView
+                const responseScript = `
+                  if (window.irisPendingRequests && window.irisPendingRequests['${
+                    message.requestId
+                  }']) {
+                    const req = window.irisPendingRequests['${
+                      message.requestId
+                    }'];
+                    delete window.irisPendingRequests['${message.requestId}'];
+                    if (${result.success}) {
+                      req.resolve(${JSON.stringify(result)});
+                    } else {
+                      req.reject(new Error(${JSON.stringify(result.error)}));
+                    }
+                  }
+                `;
+
+                if (webViewRef.current) {
+                  webViewRef.current.injectJavaScript(responseScript);
+                }
+              }
+            } catch (e) {
+              console.error('[React Native] Error parsing WebView message:', e);
+            }
+          }}
           onError={(syntheticEvent: any) => {
             const { nativeEvent } = syntheticEvent;
             console.error('[React Native] WebView error:', nativeEvent);

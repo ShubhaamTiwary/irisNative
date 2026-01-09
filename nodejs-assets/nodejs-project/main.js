@@ -3,6 +3,7 @@ const rn_bridge = require('rn-bridge');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { Buffer } = require('buffer');
 
 // Log that the Node.js runtime is starting
 console.log('[node] Node.js runtime is starting...');
@@ -274,6 +275,93 @@ async function startBaileys() {
 // Don't auto-start Baileys - wait for explicit request from React Native
 // startBaileys() will be called when a deep link is received
 
+// Shared message sending logic
+async function handleSendMessage(data) {
+  const requestId = data.requestId;
+
+  if (!baileysSocket) {
+    console.error('[node] Baileys socket not initialized');
+    rn_bridge.channel.post('message-sent', {
+      success: false,
+      error: 'Socket not initialized',
+      requestId,
+    });
+    return;
+  }
+
+  try {
+    // Support both new 'phone' and old 'phoneNumber' for backward compatibility
+    const phone = data.phone || data.phoneNumber;
+    const { message, document } = data;
+
+    console.log('[node] Extracted phone:', phone);
+    console.log('[node] Extracted message:', message);
+    if (document) {
+      console.log('[node] Document present:', {
+        mimeType: document.mimeType,
+        filename: document.filename,
+        dataLength: document.data ? document.data.length : 0,
+      });
+    }
+
+    if (!phone) {
+      throw new Error('Missing phone number');
+    }
+
+    if (!message && !document) {
+      throw new Error('Message must contain text or document');
+    }
+
+    // Format phone number (add @s.whatsapp.net if not present)
+    const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
+
+    console.log('[node] Formatted JID:', jid);
+    console.log('[node] Attempting to send message...');
+
+    // Prepare message content
+    let messageContent = {};
+
+    if (document) {
+      // Handle document sending
+      if (!document.data) {
+        throw new Error('Document data is missing');
+      }
+
+      // Convert base64 to Buffer
+      const buffer = Buffer.from(document.data, 'base64');
+
+      messageContent = {
+        document: buffer,
+        mimetype: document.mimeType || 'application/octet-stream',
+        fileName: document.filename || 'file',
+        caption: message || '', // Add text as caption if present
+      };
+    } else {
+      // Handle text only
+      messageContent = { text: message };
+    }
+
+    // Send message using Baileys
+    await baileysSocket.sendMessage(jid, messageContent);
+
+    console.log('[node] Message sent successfully to', jid);
+    rn_bridge.channel.post('message-sent', {
+      success: true,
+      phone,
+      message,
+      requestId,
+    });
+  } catch (err) {
+    console.error('[node] Failed to send message:', err);
+    console.error('[node] Error stack:', err.stack);
+    rn_bridge.channel.post('message-sent', {
+      success: false,
+      error: err.message || String(err),
+      requestId,
+    });
+  }
+}
+
 // Handle messages from React Native
 rn_bridge.channel.on('message', async msg => {
   console.log('[node] Received message from React Native:', msg);
@@ -297,50 +385,7 @@ rn_bridge.channel.on('message', async msg => {
   // Check if this is a send-message command
   if (msg && typeof msg === 'object' && msg.type === 'send-message') {
     console.log('[node] Routing send-message command from message channel');
-
-    if (!baileysSocket) {
-      console.error('[node] Baileys socket not initialized');
-      rn_bridge.channel.post('message-sent', {
-        success: false,
-        error: 'Socket not initialized',
-      });
-      return;
-    }
-
-    try {
-      const { phoneNumber, message } = msg;
-      console.log('[node] Extracted phoneNumber:', phoneNumber);
-      console.log('[node] Extracted message:', message);
-
-      if (!phoneNumber || !message) {
-        throw new Error('Missing phoneNumber or message in data');
-      }
-
-      // Format phone number (add @s.whatsapp.net if not present)
-      const jid = phoneNumber.includes('@')
-        ? phoneNumber
-        : `${phoneNumber}@s.whatsapp.net`;
-
-      console.log('[node] Formatted JID:', jid);
-      console.log('[node] Attempting to send message...');
-
-      // Send message using Baileys
-      await baileysSocket.sendMessage(jid, { text: message });
-
-      console.log('[node] Message sent successfully to', jid);
-      rn_bridge.channel.post('message-sent', {
-        success: true,
-        phoneNumber,
-        message,
-      });
-    } catch (err) {
-      console.error('[node] Failed to send message:', err);
-      console.error('[node] Error stack:', err.stack);
-      rn_bridge.channel.post('message-sent', {
-        success: false,
-        error: err.message || String(err),
-      });
-    }
+    await handleSendMessage(msg);
     return;
   }
 
@@ -356,55 +401,7 @@ rn_bridge.channel.on('message', async msg => {
 // So we'll handle it in the message handler and route based on message type
 rn_bridge.channel.on('send-message', async data => {
   console.log('[node] Received send-message request (direct):', data);
-  console.log('[node] Data type:', typeof data);
-  console.log(
-    '[node] Data keys:',
-    data && typeof data === 'object' ? Object.keys(data) : 'N/A',
-  );
-
-  if (!baileysSocket) {
-    console.error('[node] Baileys socket not initialized');
-    rn_bridge.channel.post('message-sent', {
-      success: false,
-      error: 'Socket not initialized',
-    });
-    return;
-  }
-
-  try {
-    const { phoneNumber, message } = data;
-    console.log('[node] Extracted phoneNumber:', phoneNumber);
-    console.log('[node] Extracted message:', message);
-
-    if (!phoneNumber || !message) {
-      throw new Error('Missing phoneNumber or message in data');
-    }
-
-    // Format phone number (add @s.whatsapp.net if not present)
-    const jid = phoneNumber.includes('@')
-      ? phoneNumber
-      : `${phoneNumber}@s.whatsapp.net`;
-
-    console.log('[node] Formatted JID:', jid);
-    console.log('[node] Attempting to send message...');
-
-    // Send message using Baileys
-    await baileysSocket.sendMessage(jid, { text: message });
-
-    console.log('[node] Message sent successfully to', jid);
-    rn_bridge.channel.post('message-sent', {
-      success: true,
-      phoneNumber,
-      message,
-    });
-  } catch (err) {
-    console.error('[node] Failed to send message:', err);
-    console.error('[node] Error stack:', err.stack);
-    rn_bridge.channel.post('message-sent', {
-      success: false,
-      error: err.message || String(err),
-    });
-  }
+  await handleSendMessage(data);
 });
 
 // Handle app lifecycle events
