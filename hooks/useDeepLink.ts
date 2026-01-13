@@ -16,7 +16,6 @@ export const useDeepLink = (
   const [urlToOpen, setUrlToOpen] = useState<string | null>(null);
   const [showWebView, setShowWebView] = useState(false);
   const initialDeepLinkProcessed = useRef(false);
-  const lastProcessedUrl = useRef<string | null>(null);
 
   const initializeWhatsApp = useCallback(() => {
     if (nodejsStarted) {
@@ -39,14 +38,8 @@ export const useDeepLink = (
   }, [nodejsStarted, whatsappInitialized, setNodejsStarted]);
 
   const processDeepLink = useCallback(
-    (url: string | null, forceUpdate: boolean = false) => {
+    (url: string | null) => {
       if (!url) return;
-
-      // Skip if we've already processed this exact URL (unless forced)
-      if (!forceUpdate && lastProcessedUrl.current === url) {
-        console.log('[React Native] URL already processed, skipping:', url);
-        return;
-      }
 
       const openLink = parseDeepLink(url);
       if (!openLink) {
@@ -59,7 +52,6 @@ export const useDeepLink = (
         openLink,
       );
       setHasDeepLink(true);
-      lastProcessedUrl.current = url;
 
       if (!nodejsStarted) {
         initializeWhatsApp();
@@ -189,7 +181,7 @@ export const useDeepLink = (
         '[React Native] New deep link received while app is running (Linking event):',
         url,
       );
-      processDeepLink(url, true);
+      processDeepLink(url);
     });
 
     // Listen for native intent events (for ChromeOS compatibility)
@@ -206,7 +198,7 @@ export const useDeepLink = (
               '[React Native] New deep link received while app is running (native event):',
               event.url,
             );
-            processDeepLink(event.url, true);
+            processDeepLink(event.url);
           },
         );
         console.log('[React Native] Registered native intent event listener');
