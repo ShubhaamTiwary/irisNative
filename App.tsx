@@ -10,11 +10,10 @@ import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import nodejs from 'nodejs-mobile-react-native';
 import { QRCodeDisplay } from './components/QRCodeDisplay';
 import { LoadingIndicator } from './components/LoadingIndicator';
-import { ConnectedView } from './components/ConnectedView';
 import { DeepLinkMessage } from './components/DeepLinkMessage';
 import { WebViewContainer } from './components/WebViewContainer';
 import { useWhatsApp } from './hooks/useWhatsApp';
@@ -41,8 +40,6 @@ function AppContent() {
   const {
     qrCode,
     isConnected,
-    isSending,
-    setIsSending,
     whatsappInitialized,
     isConnectedRef,
     sendMessage,
@@ -96,26 +93,6 @@ function AppContent() {
     );
   }, [nodejsStarted, setShowWebView, setUrlToOpen, setPendingUrl]);
 
-  const handleSendMessage = useCallback(async () => {
-    console.log('[React Native] handleSendMessage called');
-    setIsSending(true);
-    const phoneNumber = '917389893567';
-    const message = 'Hello from Baileys with Promise API!';
-
-    try {
-      console.log('[React Native] Sending message:', { phoneNumber, message });
-      const result = await sendMessage({
-        phone: phoneNumber,
-        message,
-      });
-      console.log('[React Native] Message sent successfully via API:', result);
-    } catch (error) {
-      console.error('[React Native] Failed to send message via API:', error);
-    } finally {
-      setIsSending(false);
-    }
-  }, [sendMessage, setIsSending]);
-
   // Show WebView if URL is available
   if (showWebView && urlToOpen) {
     return (
@@ -146,15 +123,7 @@ function AppContent() {
         {!isConnected && qrCode && (
           <QRCodeDisplay qrCode={qrCode} pendingUrl={pendingUrl} />
         )}
-
         {!isConnected && !qrCode && nodejsStarted && <LoadingIndicator />}
-
-        {isConnected && !showWebView && (
-          <ConnectedView
-            isSending={isSending}
-            onSendMessage={handleSendMessage}
-          />
-        )}
       </View>
     </View>
   );

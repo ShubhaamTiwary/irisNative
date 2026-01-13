@@ -56,9 +56,7 @@ export const WebViewContainer: React.FC<WebViewContainerProps> = ({
 
         sendResponseToWebView(message.requestId, result);
       } else if (message.type === 'logout') {
-        console.log(
-          '[React Native] Received logout request from WebView',
-        );
+        console.log('[React Native] Received logout request from WebView');
 
         let result;
         try {
@@ -144,6 +142,7 @@ export const WebViewContainer: React.FC<WebViewContainerProps> = ({
   return (
     <View style={[styles.container, { paddingTop: safeAreaInsets.top }]}>
       <WebView
+        key={url}
         ref={webViewRef}
         source={{ uri: url }}
         style={styles.webview}
@@ -171,4 +170,3 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 });
-

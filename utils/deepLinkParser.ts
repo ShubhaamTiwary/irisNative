@@ -1,27 +1,55 @@
 /**
  * Parse deep link URL to extract openLink parameter
- * Format: iris://?openLink=https://example.com
+ * Formats:
+ * - iris://?openLink=https://example.com (custom scheme)
+ * - https://iris.app/?openLink=https://example.com (HTTP/HTTPS for ChromeOS)
+ * - http://iris.app/?openLink=https://example.com (HTTP/HTTPS for ChromeOS)
  */
 export const parseDeepLink = (url: string): string | null => {
   try {
     console.log('[React Native] Parsing deep link:', url);
-    if (!url || !url.includes('iris://')) {
+    if (!url) {
       return null;
     }
 
-    // Handle the case where openLink contains query parameters
-    // Format: iris://?openLink=https://example.com?param1=value1&param2=value2
-    // The openLink value itself may contain & characters, so we need to extract it carefully
+    let queryString = '';
 
-    // Remove the scheme part
-    const urlWithoutScheme = url.replace('iris://', '');
+    // Handle custom scheme: iris://?openLink=...
+    if (url.includes('iris://')) {
+      // Remove the scheme part
+      const urlWithoutScheme = url.replace('iris://', '');
 
-    // Check if there's a query string
-    if (!urlWithoutScheme.startsWith('?')) {
+      // Check if there's a query string
+      if (!urlWithoutScheme.startsWith('?')) {
+        return null;
+      }
+
+      queryString = urlWithoutScheme.substring(1); // Remove the '?'
+    }
+    // Handle HTTP/HTTPS scheme: https://iris.app/?openLink=... or http://iris.app/?openLink=...
+    else if (url.includes('://iris.app/') || url.includes('://iris.app?')) {
+      try {
+        const urlObj = new URL(url);
+        // Extract query string from URL object
+        const search = (urlObj as any).search || '';
+        queryString = search.startsWith('?') ? search.substring(1) : search;
+      } catch (error) {
+        console.error('[React Native] Error parsing HTTP/HTTPS URL:', error);
+        // Fallback: manually extract query string
+        const queryIndex = url.indexOf('?');
+        if (queryIndex !== -1) {
+          queryString = url.substring(queryIndex + 1);
+        } else {
+          return null;
+        }
+      }
+    } else {
       return null;
     }
 
-    const queryString = urlWithoutScheme.substring(1); // Remove the '?'
+    if (!queryString) {
+      return null;
+    }
 
     // Find the position of 'openLink='
     const openLinkIndex = queryString.indexOf('openLink=');
