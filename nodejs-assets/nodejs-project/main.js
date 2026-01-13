@@ -9,6 +9,26 @@ const { Buffer } = require('buffer');
 console.log('[node] Node.js runtime is starting...');
 console.log('[node] Node version:', process.version);
 
+// Set up writable temp directory for Android
+// On Android, /tmp is not writable, so we need to use the app's internal storage
+const tempDir = path.join(__dirname, 'tmp');
+if (!fs.existsSync(tempDir)) {
+  console.log('[node] Creating temp directory:', tempDir);
+  fs.mkdirSync(tempDir, { recursive: true });
+}
+// Set environment variables for temp directory
+process.env.TMPDIR = tempDir;
+process.env.TMP = tempDir;
+process.env.TEMP = tempDir;
+console.log('[node] Temp directory set to:', tempDir);
+
+// Override os.tmpdir() to return our custom temp directory
+// This ensures all libraries use our writable temp directory
+const os = require('os');
+const originalTmpdir = os.tmpdir;
+os.tmpdir = () => tempDir;
+console.log('[node] os.tmpdir() overridden to use:', tempDir);
+
 // Polyfill Web Crypto API for Baileys
 if (!globalThis.crypto || !globalThis.crypto.subtle) {
   console.log('[node] Setting up Web Crypto API polyfill...');
