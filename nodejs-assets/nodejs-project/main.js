@@ -196,7 +196,10 @@ async function startBaileys() {
       );
       // Extract and store phone number if available
       if (meId) {
-        loggedInPhoneNumber = meId.includes('@') ? meId.split('@')[0] : meId;
+        // Extract JID part (before @s.whatsapp.net)
+        const jidPart = meId.includes('@') ? meId.split('@')[0] : meId;
+        // Remove device identifier (everything after :)
+        loggedInPhoneNumber = jidPart.split(':')[0];
         console.log('[node] Stored phone number:', loggedInPhoneNumber);
       }
     } else {
@@ -297,9 +300,12 @@ async function startBaileys() {
         if (sock.user) {
           const userId = sock.user.id || '';
           if (userId) {
-            loggedInPhoneNumber = userId.includes('@')
+            // Extract JID part (before @s.whatsapp.net)
+            const jidPart = userId.includes('@')
               ? userId.split('@')[0]
               : userId;
+            // Remove device identifier (everything after :)
+            loggedInPhoneNumber = jidPart.split(':')[0];
             console.log(
               '[node] Stored phone number from connection:',
               loggedInPhoneNumber,
@@ -492,12 +498,21 @@ async function handleGetPhoneNumber(data) {
     // Try to get phone number from stored value first
     let phoneNumber = loggedInPhoneNumber;
 
+    // Clean stored value if it has device identifier (legacy fix)
+    if (phoneNumber && phoneNumber.includes(':')) {
+      phoneNumber = phoneNumber.split(':')[0];
+      loggedInPhoneNumber = phoneNumber; // Update stored value
+    }
+
     // If not stored, try multiple methods to get from socket
     if (!phoneNumber) {
       // Method 1: Try baileysSocket.user.id
       if (baileysSocket.user && baileysSocket.user.id) {
         const userId = baileysSocket.user.id;
-        phoneNumber = userId.includes('@') ? userId.split('@')[0] : userId;
+        // Extract JID part (before @s.whatsapp.net)
+        const jidPart = userId.includes('@') ? userId.split('@')[0] : userId;
+        // Remove device identifier (everything after :)
+        phoneNumber = jidPart.split(':')[0];
         console.log(
           '[node] Got phone number from socket.user.id:',
           phoneNumber,
@@ -511,7 +526,10 @@ async function handleGetPhoneNumber(data) {
         baileysSocket.authState.creds.me.id
       ) {
         const meId = baileysSocket.authState.creds.me.id;
-        phoneNumber = meId.includes('@') ? meId.split('@')[0] : meId;
+        // Extract JID part (before @s.whatsapp.net)
+        const jidPart = meId.includes('@') ? meId.split('@')[0] : meId;
+        // Remove device identifier (everything after :)
+        phoneNumber = jidPart.split(':')[0];
         console.log(
           '[node] Got phone number from authState.creds.me.id:',
           phoneNumber,
@@ -521,7 +539,10 @@ async function handleGetPhoneNumber(data) {
       else if (baileysSocket.ws && baileysSocket.ws.user) {
         const userId = baileysSocket.ws.user.id || '';
         if (userId) {
-          phoneNumber = userId.includes('@') ? userId.split('@')[0] : userId;
+          // Extract JID part (before @s.whatsapp.net)
+          const jidPart = userId.includes('@') ? userId.split('@')[0] : userId;
+          // Remove device identifier (everything after :)
+          phoneNumber = jidPart.split(':')[0];
           console.log('[node] Got phone number from ws.user.id:', phoneNumber);
         }
       }
@@ -529,15 +550,6 @@ async function handleGetPhoneNumber(data) {
       // Store it for future requests if we found it
       if (phoneNumber) {
         loggedInPhoneNumber = phoneNumber;
-      }
-    }
-
-    // Validate phone number format (should be numeric)
-    if (phoneNumber) {
-      // Remove any non-numeric characters except + at the start
-      const cleaned = phoneNumber.replace(/[^\d+]/g, '');
-      if (cleaned.length > 0) {
-        phoneNumber = cleaned;
       }
     }
 
